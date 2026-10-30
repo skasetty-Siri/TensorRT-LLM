@@ -84,8 +84,9 @@ class _ServeSchemaGeneratorMixin:
 
     def tagged_union_schema(self, schema: core_schema.TaggedUnionSchema) -> JsonSchemaValue:
         result = super().tagged_union_schema(schema)
-        tag = schema["discriminator"]
-        if isinstance(tag, str):
+        # Pydantic emits the tag's JSON name (alias resolved) only for field discriminators.
+        tag = result.get("discriminator", {}).get("propertyName")
+        if tag is not None:
             # Validation reads the tag before choosing a branch, so a mapping without it is
             # rejected even when the branch model defaults the field. Require it on the union
             # branches only; the shared definitions keep their Python defaults.

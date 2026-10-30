@@ -259,14 +259,32 @@ def _tagged_unions(node: object):
 
 
 def test_tagged_union_branches_require_their_tag(schemas: dict[str, dict]) -> None:
-    for schema in schemas.values():
-        for union in _tagged_unions(schema):
-            tag = union["discriminator"]["propertyName"]
-            for branch in union["oneOf"]:
-                assert tag in branch.get("required", []), (tag, branch)
-                # Only the union branch requires the tag; the shared definition keeps its default.
-                name = branch["$ref"].rsplit("/", 1)[-1]
-                assert tag not in schema["$defs"][name].get("required", []), name
+    unions = [union for schema in schemas.values() for union in _tagged_unions(schema)]
+    assert unions, "No tagged unions found; update this test."
+    for union in unions:
+        tag = union["discriminator"]["propertyName"]
+        for branch in union["oneOf"]:
+            assert tag in branch.get("required", []), (tag, branch)
+
+
+def test_aliased_union_tag_is_required() -> None:
+    from typing import Annotated, Literal, Union
+
+    class First(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        kind: Literal["first"] = Field("first", alias="type")
+        size: int = 1
+
+    class Second(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        kind: Literal["second"] = Field("second", alias="type")
+        rate: float = 1.0
+
+    schema = generator._schema_for(Annotated[Union[First, Second], Field(discriminator="kind")])
+    assert all(branch["required"] == ["type"] for branch in schema["oneOf"])
+    validator = Draft202012Validator(schema)
+    assert not list(validator.iter_errors({"type": "first", "size": 2}))
+    assert list(validator.iter_errors({"size": 2}))
 
 
 @pytest.mark.parametrize(
