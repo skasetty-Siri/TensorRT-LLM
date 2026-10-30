@@ -170,6 +170,74 @@ def schemas(tmp_path_factory: pytest.TempPathFactory) -> dict[str, dict]:
         (generator.VISUAL_GEN_SCHEMA, {"parallel_config": {"text_encoder_tp_size": 2}}, True),
         (generator.VISUAL_GEN_SCHEMA, {"parallel_config": {"text_encoder_tp_size": 0}}, False),
         (generator.VISUAL_GEN_SCHEMA, {"attention_config": {"backend": "not-a-backend"}}, False),
+        # Tagged unions: the tag is required even where the branch model defaults it.
+        (
+            generator.SERVE_SCHEMA,
+            {
+                "speculative_config": {
+                    "decoding_type": "NGram",
+                    "max_draft_len": 3,
+                    "max_matching_ngram_size": 4,
+                }
+            },
+            True,
+        ),
+        (
+            generator.SERVE_SCHEMA,
+            {"speculative_config": {"max_matching_ngram_size": 4, "is_keep_all": True}},
+            False,
+        ),
+        (
+            generator.SERVE_SCHEMA,
+            {"sparse_attention_config": {"algorithm": "rocket", "kt_cache_dtype": "float8_e5m2"}},
+            True,
+        ),
+        (
+            generator.SERVE_SCHEMA,
+            {"sparse_attention_config": {"kt_cache_dtype": "float8_e5m2"}},
+            False,
+        ),
+        (
+            generator.SERVE_SCHEMA,
+            {
+                "kv_cache_compression_config": {
+                    "algorithm": "quantization_for_cold_page",
+                    "skip_rope_quantization": True,
+                }
+            },
+            True,
+        ),
+        (
+            generator.SERVE_SCHEMA,
+            {"kv_cache_compression_config": {"skip_rope_quantization": True}},
+            False,
+        ),
+        (
+            generator.VISUAL_GEN_SCHEMA,
+            {"cache_config": {"cache_backend": "teacache", "teacache_thresh": 0.1}},
+            True,
+        ),
+        (generator.VISUAL_GEN_SCHEMA, {"cache_config": {"teacache_thresh": 0.1}}, False),
+        (
+            generator.VISUAL_GEN_SCHEMA,
+            {
+                "attention_config": {
+                    "backend": "TRTLLM",
+                    "sparse_attention_config": {"algorithm": "vsa", "vsa_sparsity": 0.5},
+                }
+            },
+            True,
+        ),
+        (
+            generator.VISUAL_GEN_SCHEMA,
+            {
+                "attention_config": {
+                    "backend": "TRTLLM",
+                    "sparse_attention_config": {"vsa_sparsity": 0.5},
+                }
+            },
+            False,
+        ),
     ],
 )
 def test_config_validation(
@@ -177,6 +245,54 @@ def test_config_validation(
 ) -> None:
     errors = list(Draft202012Validator(schemas[filename]).iter_errors(config))
     assert (not errors) == valid, [error.message for error in errors]
+
+
+def _tagged_unions(node: object):
+    if isinstance(node, dict):
+        if "discriminator" in node:
+            yield node
+        for value in node.values():
+            yield from _tagged_unions(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _tagged_unions(value)
+
+
+def test_tagged_union_branches_require_their_tag(schemas: dict[str, dict]) -> None:
+    for schema in schemas.values():
+        for union in _tagged_unions(schema):
+            tag = union["discriminator"]["propertyName"]
+            for branch in union["oneOf"]:
+                assert tag in branch.get("required", []), (tag, branch)
+                # Only the union branch requires the tag; the shared definition keeps its default.
+                name = branch["$ref"].rsplit("/", 1)[-1]
+                assert tag not in schema["$defs"][name].get("required", []), name
+
+
+@pytest.mark.parametrize(
+    ("owner", "field", "value"),
+    [
+        ("TorchLlmArgs", "speculative_config", {"max_matching_ngram_size": 4, "is_keep_all": True}),
+        ("TorchLlmArgs", "sparse_attention_config", {"kt_cache_dtype": "float8_e5m2"}),
+        ("TorchLlmArgs", "kv_cache_compression_config", {"skip_rope_quantization": True}),
+        ("VisualGenArgs", "cache_config", {"teacache_thresh": 0.1}),
+        ("AttentionConfig", "sparse_attention_config", {"vsa_sparsity": 0.5}),
+    ],
+)
+def test_runtime_rejects_untagged_union_values(owner: str, field: str, value: dict) -> None:
+    from pydantic import TypeAdapter, ValidationError
+
+    from tensorrt_llm.llmapi.llm_args import TorchLlmArgs
+    from tensorrt_llm.visual_gen.args import AttentionConfig, VisualGenArgs
+
+    model = {
+        "TorchLlmArgs": TorchLlmArgs,
+        "VisualGenArgs": VisualGenArgs,
+        "AttentionConfig": AttentionConfig,
+    }[owner]
+    with pytest.raises(ValidationError) as excinfo:
+        TypeAdapter(model.model_fields[field].annotation).validate_python(value)
+    assert "union_tag_not_found" in {error["type"] for error in excinfo.value.errors()}
 
 
 @pytest.mark.parametrize("filename", [generator.SERVE_SCHEMA, generator.DISAGG_SCHEMA])

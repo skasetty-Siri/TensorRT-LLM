@@ -82,6 +82,19 @@ class _ServeSchemaGeneratorMixin:
                         properties[name] = copy.deepcopy(properties[names[0]])
         return result
 
+    def tagged_union_schema(self, schema: core_schema.TaggedUnionSchema) -> JsonSchemaValue:
+        result = super().tagged_union_schema(schema)
+        tag = schema["discriminator"]
+        if isinstance(tag, str):
+            # Validation reads the tag before choosing a branch, so a mapping without it is
+            # rejected even when the branch model defaults the field. Require it on the union
+            # branches only; the shared definitions keep their Python defaults.
+            for branch in result.get("oneOf", []):
+                required = branch.setdefault("required", [])
+                if tag not in required:
+                    required.append(tag)
+        return result
+
     def dataclass_schema(self, schema: core_schema.DataclassSchema) -> JsonSchemaValue:
         result = super().dataclass_schema(schema)
         # These configs are constructed with **yaml_dict, which rejects unknown arguments.
